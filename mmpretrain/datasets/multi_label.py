@@ -12,9 +12,6 @@ class MultiLabelDataset(BaseDataset):
     This dataset support annotation file in `OpenMMLab 2.0 style annotation
     format`.
 
-    .. _OpenMMLab 2.0 style annotation format:
-        https://github.com/open-mmlab/mmengine/blob/main/docs/zh_cn/tutorials/basedataset.md
-
     The annotation format is shown as follows.
 
     .. code-block:: none
@@ -28,11 +25,11 @@ class MultiLabelDataset(BaseDataset):
             [
               {
                 "img_path": "test_img1.jpg",
-                'img_label': [0, 1],
+                'gt_label': [0, 1],
               },
               {
                 "img_path": "test_img2.jpg",
-                'img_label': [2],
+                'gt_label': [2],
               },
             ]
             ....

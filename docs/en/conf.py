@@ -219,6 +219,8 @@ intersphinx_mapping = {
     'torch': ('https://pytorch.org/docs/stable/', None),
     'mmcv': ('https://mmcv.readthedocs.io/en/2.x/', None),
     'mmengine': ('https://mmengine.readthedocs.io/en/latest/', None),
+    'transformers':
+    ('https://huggingface.co/docs/transformers/main/en/', None),
 }
 napoleon_custom_sections = [
     # Custom sections for data elements.
@@ -229,7 +231,7 @@ napoleon_custom_sections = [
 # Disable docstring inheritance
 autodoc_inherit_docstrings = False
 # Mock some imports during generate API docs.
-autodoc_mock_imports = ['rich', 'attr', 'einops']
+autodoc_mock_imports = ['rich', 'attr', 'einops', 'mat4py']
 # Disable displaying type annotations, these can be very verbose
 autodoc_typehints = 'none'
 

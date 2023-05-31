@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from mmpretrain.utils.dependency import WITH_MULTIMODAL
 from .attention import (BEiTAttention, ChannelMultiheadAttention,
                         CrossMultiheadAttention, LeAttention,
                         MultiheadAttention, PromptMultiheadAttention,
@@ -6,8 +7,10 @@ from .attention import (BEiTAttention, ChannelMultiheadAttention,
 from .batch_augments import CutMix, Mixup, RandomBatchAugment, ResizeMix
 from .batch_shuffle import batch_shuffle_ddp, batch_unshuffle_ddp
 from .channel_shuffle import channel_shuffle
-from .clip_generator_helper import build_clip_model
-from .data_preprocessor import (ClsDataPreprocessor, SelfSupDataPreprocessor,
+from .clip_generator_helper import QuickGELU, build_clip_model
+from .data_preprocessor import (ClsDataPreprocessor,
+                                MultiModalDataPreprocessor,
+                                SelfSupDataPreprocessor,
                                 TwoNormDataPreprocessor, VideoDataPreprocessor)
 from .ema import CosineEMA
 from .embed import (HybridEmbed, PatchEmbed, PatchMerging, resize_pos_embed,
@@ -18,10 +21,11 @@ from .layer_scale import LayerScale
 from .make_divisible import make_divisible
 from .norm import GRN, LayerNorm2d, build_norm_layer
 from .position_encoding import (ConditionalPositionEncoding,
-                                PositionEncodingFourier,
+                                PositionEncodingFourier, RotaryEmbeddingFast,
                                 build_2d_sincos_position_embedding)
 from .res_layer_extra_norm import ResLayerExtraNorm
 from .se_layer import SELayer
+from .swiglu_ffn import SwiGLUFFN, SwiGLUFFNFused
 from .vector_quantizer import NormEMAVectorQuantizer
 
 __all__ = [
@@ -69,4 +73,20 @@ __all__ = [
     'VideoDataPreprocessor',
     'CosineEMA',
     'ResLayerExtraNorm',
+    'MultiModalDataPreprocessor',
+    'QuickGELU',
+    'SwiGLUFFN',
+    'SwiGLUFFNFused',
+    'RotaryEmbeddingFast',
 ]
+
+if WITH_MULTIMODAL:
+    from .huggingface import (no_load_hf_pretrained_model, register_hf_model,
+                              register_hf_tokenizer)
+    from .tokenizer import (Blip2Tokenizer, BlipTokenizer, FullTokenizer,
+                            OFATokenizer)
+
+    __all__.extend([
+        'BlipTokenizer', 'OFATokenizer', 'Blip2Tokenizer', 'register_hf_model',
+        'register_hf_tokenizer', 'no_load_hf_pretrained_model', 'FullTokenizer'
+    ])

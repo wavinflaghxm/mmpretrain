@@ -2,14 +2,20 @@
 import inspect
 import math
 import numbers
+import re
+import string
+import traceback
+from enum import EnumMeta
 from numbers import Number
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import mmcv
 import mmengine
 import numpy as np
+import torchvision
 from mmcv.transforms import BaseTransform
 from mmcv.transforms.utils import cache_randomness
+from torchvision.transforms.transforms import InterpolationMode
 
 from mmpretrain.registry import TRANSFORMS
 
@@ -17,6 +23,92 @@ try:
     import albumentations
 except ImportError:
     albumentations = None
+
+
+def _str_to_torch_dtype(t: str):
+    """mapping str format dtype to torch.dtype."""
+    import torch  # noqa: F401,F403
+    return eval(f'torch.{t}')
+
+
+def _interpolation_modes_from_str(t: str):
+    """mapping str format to Interpolation."""
+    t = t.lower()
+    inverse_modes_mapping = {
+        'nearest': InterpolationMode.NEAREST,
+        'bilinear': InterpolationMode.BILINEAR,
+        'bicubic': InterpolationMode.BICUBIC,
+        'box': InterpolationMode.BOX,
+        'hammimg': InterpolationMode.HAMMING,
+        'lanczos': InterpolationMode.LANCZOS,
+    }
+    return inverse_modes_mapping[t]
+
+
+def _warpper_vision_transform_cls(vision_transform_cls, new_name):
+    """build a transform warpper class for specific torchvison.transform to
+    handle the different input type between torchvison.transforms with
+    mmcls.datasets.transforms."""
+
+    def new_init(self, *args, **kwargs):
+        if 'interpolation' in kwargs and isinstance(kwargs['interpolation'],
+                                                    str):
+            kwargs['interpolation'] = _interpolation_modes_from_str(
+                kwargs['interpolation'])
+        if 'dtype' in kwargs and isinstance(kwargs['dtype'], str):
+            kwargs['dtype'] = _str_to_torch_dtype(kwargs['dtype'])
+
+        try:
+            self.t = vision_transform_cls(*args, **kwargs)
+        except TypeError as e:
+            traceback.print_exc()
+            raise TypeError(
+                f'Error when init the {vision_transform_cls}, please '
+                f'check the argmemnts of {args} and {kwargs}. \n{e}')
+
+    def new_call(self, input):
+        try:
+            input['img'] = self.t(input['img'])
+        except Exception as e:
+            traceback.print_exc()
+            raise Exception('Error when processing of transform(`torhcvison/'
+                            f'{vision_transform_cls.__name__}`). \n{e}')
+        return input
+
+    def new_str(self):
+        return str(self.t)
+
+    new_transforms_cls = type(
+        new_name, (),
+        dict(__init__=new_init, __call__=new_call, __str__=new_str))
+    return new_transforms_cls
+
+
+def register_vision_transforms() -> List[str]:
+    """Register transforms in ``torchvision.transforms`` to the ``TRANSFORMS``
+    registry.
+
+    Returns:
+        List[str]: A list of registered transforms' name.
+    """
+    vision_transforms = []
+    for module_name in dir(torchvision.transforms):
+        if not re.match('[A-Z]', module_name):
+            # must startswith a capital letter
+            continue
+        _transform = getattr(torchvision.transforms, module_name)
+        if inspect.isclass(_transform) and callable(
+                _transform) and not isinstance(_transform, (EnumMeta)):
+            new_cls = _warpper_vision_transform_cls(
+                _transform, f'TorchVison{module_name}')
+            TRANSFORMS.register_module(
+                module=new_cls, name=f'torchvision/{module_name}')
+            vision_transforms.append(f'torchvision/{module_name}')
+    return vision_transforms
+
+
+# register all the transforms in torchvision by using a transform wrapper
+VISION_TRANSFORMS = register_vision_transforms()
 
 
 @TRANSFORMS.register_module()
@@ -1533,3 +1625,138 @@ class RandomResizedCropAndInterpolationWithTwoPic(BaseTransform):
         repr_str += f'scale={self.scale}, '
         repr_str += f'ratio={self.ratio})'
         return repr_str
+
+
+@TRANSFORMS.register_module()
+class CleanCaption(BaseTransform):
+    """Clean caption text.
+
+    Remove some useless punctuation for the caption task.
+
+    **Required Keys:**
+
+    - ``*keys``
+
+    **Modified Keys:**
+
+    - ``*keys``
+
+    Args:
+        keys (Sequence[str], optional): The keys of text to be cleaned.
+            Defaults to 'gt_caption'.
+        remove_chars (str): The characters to be removed. Defaults to
+            :py:attr:`string.punctuation`.
+        lowercase (bool): Whether to convert the text to lowercase.
+            Defaults to True.
+        remove_dup_space (bool): Whether to remove duplicated whitespaces.
+            Defaults to True.
+        strip (bool): Whether to remove leading and trailing whitespaces.
+            Defaults to True.
+    """
+
+    def __init__(
+        self,
+        keys='gt_caption',
+        remove_chars=string.punctuation,
+        lowercase=True,
+        remove_dup_space=True,
+        strip=True,
+    ):
+        if isinstance(keys, str):
+            keys = [keys]
+        self.keys = keys
+        self.transtab = str.maketrans({ch: None for ch in remove_chars})
+        self.lowercase = lowercase
+        self.remove_dup_space = remove_dup_space
+        self.strip = strip
+
+    def _clean(self, text):
+        """Perform text cleaning before tokenizer."""
+
+        if self.strip:
+            text = text.strip()
+
+        text = text.translate(self.transtab)
+
+        if self.remove_dup_space:
+            text = re.sub(r'\s{2,}', ' ', text)
+
+        if self.lowercase:
+            text = text.lower()
+
+        return text
+
+    def clean(self, text):
+        """Perform text cleaning before tokenizer."""
+        if isinstance(text, (list, tuple)):
+            return [self._clean(item) for item in text]
+        elif isinstance(text, str):
+            return self._clean(text)
+        else:
+            raise TypeError('text must be a string or a list of strings')
+
+    def transform(self, results: dict) -> dict:
+        """Method to clean the input text data."""
+        for key in self.keys:
+            results[key] = self.clean(results[key])
+        return results
+
+
+@TRANSFORMS.register_module()
+class OFAAddObjects(BaseTransform):
+
+    def transform(self, results: dict) -> dict:
+        if 'objects' not in results:
+            raise ValueError(
+                'Some OFA fine-tuned models requires `objects` field in the '
+                'dataset, which is generated by VinVL. Or please use '
+                'zero-shot configs. See '
+                'https://github.com/OFA-Sys/OFA/issues/189')
+
+        if 'question' in results:
+            prompt = '{} object: {}'.format(
+                results['question'],
+                ' '.join(results['objects']),
+            )
+            results['decoder_prompt'] = prompt
+            results['question'] = prompt
+
+
+@TRANSFORMS.register_module()
+class RandomTranslatePad(BaseTransform):
+
+    def __init__(self, size=640, aug_translate=False):
+        self.size = size
+        self.aug_translate = aug_translate
+
+    @cache_randomness
+    def rand_translate_params(self, dh, dw):
+        top = np.random.randint(0, dh)
+        left = np.random.randint(0, dw)
+        return top, left
+
+    def transform(self, results: dict) -> dict:
+        img = results['img']
+        h, w = img.shape[:-1]
+        dw = self.size - w
+        dh = self.size - h
+        if self.aug_translate:
+            top, left = self.rand_translate_params(dh, dw)
+        else:
+            top = round(dh / 2.0 - 0.1)
+            left = round(dw / 2.0 - 0.1)
+
+        out_img = np.zeros((self.size, self.size, 3), dtype=np.float32)
+        out_img[top:top + h, left:left + w, :] = img
+        results['img'] = out_img
+        results['img_shape'] = (self.size, self.size)
+
+        # translate box
+        if 'gt_bboxes' in results.keys():
+            for i in range(len(results['gt_bboxes'])):
+                box = results['gt_bboxes'][i]
+                box[0], box[2] = box[0] + left, box[2] + left
+                box[1], box[3] = box[1] + top, box[3] + top
+                results['gt_bboxes'][i] = box
+
+        return results

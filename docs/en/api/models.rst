@@ -121,6 +121,26 @@ Retrievers
    BaseRetriever
    ImageToImageRetriever
 
+.. module:: mmpretrain.models.multimodal
+
+Multi-Modality Algorithms
+--------------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   Blip2Caption
+   Blip2Retrieval
+   Blip2VQA
+   BlipCaption
+   BlipGrounding
+   BlipNLVR
+   BlipRetrieval
+   BlipVQA
+   Flamingo
+   OFA
+
 .. module:: mmpretrain.models.backbones
 
 Backbones
@@ -187,7 +207,9 @@ Backbones
    VGG
    Vig
    VisionTransformer
+   ViTSAM
    XCiT
+   ViTEVA02
 
 .. module:: mmpretrain.models.necks
 

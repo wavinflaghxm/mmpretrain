@@ -148,3 +148,6 @@ checkpoint
 model_params.txt
 *.ckpt*
 results.txt
+
+# Local History for Visual Studio Code
+.history/

@@ -8,14 +8,21 @@ import mmengine
 
 
 def convert_text(model_key, model_weight, state_dict, converted_names):
-    new_key = model_key
+    new_key = 'text_backbone.' + model_key
+    if 'token_embedding' in model_key:
+        new_key = new_key.replace('token_embedding', 'token_embed')
+        model_weight = model_weight
+    if 'positional_embedding' in model_key:
+        new_key = new_key.replace('positional_embedding', 'pos_embed')
+    if 'text_projection' in model_key:
+        new_key = new_key.replace('text_backbone.text_projection', 'text_projection')
     state_dict[new_key] = model_weight
     converted_names.add(model_key)
     print(f'Convert {model_key} to {new_key}')
 
 
 def convert_visual(model_key, model_weight, state_dict, converted_names):
-    new_key = model_key
+    new_key = model_key.replace('visual.', 'vision_backbone.')
     if 'transformer.' in model_key:
         new_key = new_key.replace('transformer.', '')
     if 'resblocks' in model_key:
@@ -35,14 +42,12 @@ def convert_visual(model_key, model_weight, state_dict, converted_names):
     if 'positional_embedding' in model_key:
         new_key = new_key.replace('positional_embedding', 'pos_embed')
         model_weight = model_weight[None, ...]
+    if 'ln_post' in model_key:
+        new_key = new_key.replace('ln_post', 'ln1')
     if 'visual.conv1' in model_key:
         new_key = new_key.replace('conv1', 'patch_embed.projection')
-    if 'visual.attn_pool' in model_key:
-        new_key = new_key.replace('visual.attn_pool', 'visual_attn_pool')
-    if 'visual.ln_post' in model_key:
-        new_key = new_key.replace('visual.ln_post', 'visual_final_norm')
     if 'visual.proj' in model_key:
-        new_key = new_key.replace('visual.proj', 'visual_projection')
+        new_key = new_key.replace('vision_backbone.proj', 'vision_projection')
     
     state_dict[new_key] = model_weight
     converted_names.add(model_key)
@@ -57,7 +62,11 @@ def convert(src, dst):
     state_dict = OrderedDict()
     converted_names = set()
     for key, weight in ori_model.items():
-        if 'visual' in key:
+        if 'logit_scale' in key:
+            state_dict[key] = weight
+            converted_names.add(key)
+            print(f'Convert {key} to {key}')
+        elif 'visual' in key:
             convert_visual(key, weight, state_dict, converted_names)
         else:
             convert_text(key, weight, state_dict, converted_names)

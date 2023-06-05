@@ -13,43 +13,6 @@ from mmengine.model import BaseModule
 from mmpretrain.registry import MODELS
 
 
-@MODELS.register_module(name='LN_fp32')
-class LayerNormFp32(nn.LayerNorm):
-    """Subclass torch's LayerNorm to handle fp16 (by casting to float32 and back)."""
-
-    def forward(self, x: Tensor):
-        orig_type = x.dtype
-        x = F.layer_norm(x.to(torch.float32), self.normalized_shape, self.weight, self.bias, self.eps)
-        return x.to(orig_type)
-
-
-@MODELS.register_module(name='LN_cast_dtype')
-class LayerNorm(nn.LayerNorm):
-    """Subclass torch's LayerNorm (with cast back to input dtype)."""
-
-    def forward(self, x: Tensor):
-        orig_type = x.dtype
-        x = F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        return x.to(orig_type)
-
-
-@MODELS.register_module()
-class QuickGELU(nn.Module):
-    # NOTE This is slower than nn.GELU or nn.SiLU and uses more GPU memory
-    def forward(self, x: Tensor):
-        return x * torch.sigmoid(1.702 * x)
-
-
-class LayerScale(nn.Module):
-    def __init__(self, dim, init_values=1e-5, inplace=False):
-        super().__init__()
-        self.inplace = inplace
-        self.gamma = nn.Parameter(init_values * torch.ones(dim))
-
-    def forward(self, x):
-        return x.mul_(self.gamma) if self.inplace else x * self.gamma
-
-
 class AttentionPool2d(BaseModule):
     def __init__(
             self,
@@ -75,6 +38,16 @@ class AttentionPool2d(BaseModule):
 
     def _repeat(self, query: Tensor, N: int) -> Tensor:
         return query.unsqueeze(1).repeat(1, N, 1)
+
+
+class LayerScale(nn.Module):
+    def __init__(self, dim, init_values=1e-5, inplace=False):
+        super().__init__()
+        self.inplace = inplace
+        self.gamma = nn.Parameter(init_values * torch.ones(dim))
+
+    def forward(self, x):
+        return x.mul_(self.gamma) if self.inplace else x * self.gamma
 
 
 class ResidualAttentionBlock(BaseModule):
@@ -169,8 +142,9 @@ class Transformer(BaseModule):
 
 
 @MODELS.register_module()
-class TextTransformer(BaseModule):
-    output_tokens: torch.jit.Final[bool]
+class CLIPTextTransformer(BaseModule):
+    num_extra_tokens = 1  # class token
+    OUT_TYPES = {'raw', 'token', 'both'}
 
     def __init__(self,
                  context_length: int = 77,
@@ -178,34 +152,37 @@ class TextTransformer(BaseModule):
                  width: int = 512,
                  num_heads: int = 8,
                  num_layers: int = 12,
-                 output_dims: int = 512,
                  ls_init_value: Optional[float] = None,
                  act_cfg: dict = dict(type='GELU'),
                  norm_cfg: dict = dict(type='LN'),
-                 embed_cls: bool = False,
                  pad_id: int = 0,
-                 output_tokens: bool = False,
+                 out_type: str = 'token',
+                 with_cls_token: bool = False,
+                 frozen_stages: int = -1,
                  with_cp: bool = False,
                  init_cfg: Optional[dict] = None) -> None:
-        super().__init__(init_cfg=init_cfg)
-        self.output_tokens = output_tokens
-        self.num_pos = self.context_length = context_length
+        super(CLIPTextTransformer, self).__init__(init_cfg=init_cfg)
+        self.context_length = context_length
         self.vocab_size = vocab_size
         self.width = width
         self.num_heads = num_heads
-        self.output_dims = output_dims
         self.pad_id = pad_id
 
-        self.text_projection = nn.Parameter(torch.empty(width, output_dims))
+        # Set out type
+        if out_type not in self.OUT_TYPES:
+            raise ValueError(f'Unsupported `out_type` {out_type}, please '
+                             f'choose from {self.OUT_TYPES}')
+        self.out_type = out_type
 
-        if embed_cls:
-            self.cls_emb = nn.Parameter(torch.empty(width))
-            self.num_pos += 1
+        if with_cls_token:
+            self.cls_token = nn.Parameter(torch.empty(width))
         else:
-            self.cls_emb = None
+            self.cls_token = None
+            self.num_extra_tokens = 0
 
-        self.token_embedding = nn.Embedding(vocab_size, width)
-        self.positional_embedding = nn.Parameter(torch.empty(self.num_pos, width))
+        num_pos = self.context_length + self.num_extra_tokens
+        self.token_embed = nn.Embedding(vocab_size, width)
+        self.pos_embed = nn.Parameter(torch.empty(num_pos, width))
         self.transformer = Transformer(
             width=width,
             num_layers=num_layers,
@@ -216,32 +193,38 @@ class TextTransformer(BaseModule):
             with_cp=with_cp)
         self.ln_final = build_norm_layer(norm_cfg, width)[1]
 
-        self.register_buffer('attn_mask', self.build_attention_mask(), persistent=False)
+        self.frozen_stages = frozen_stages
+         # freeze stages only when self.frozen_stages > 0
+        if self.frozen_stages > 0:
+            self._freeze_stages()
 
-        self.init_parameters()
+        self.register_buffer('attn_mask', self.build_attention_mask(num_pos), persistent=False)
 
-    def init_parameters(self):
-        nn.init.normal_(self.token_embedding.weight, std=0.02)
-        nn.init.normal_(self.positional_embedding, std=0.01)
-        if self.cls_emb is not None:
-            nn.init.normal_(self.cls_emb, std=0.01)
+    def init_weights(self):
+        """Weight initialization."""
+        super().init_weights()
 
-        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.num_layers) ** -0.5)
-        attn_std = self.transformer.width ** -0.5
-        fc_std = (2 * self.transformer.width) ** -0.5
-        for block in self.transformer.resblocks:
-            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
-            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
-            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
-            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+        if not (isinstance(self.init_cfg, dict)
+                and self.init_cfg['type'] == 'Pretrained'):
+            nn.init.normal_(self.token_embed.weight, std=0.02)
+            nn.init.normal_(self.pos_embed, std=0.01)
+            if self.cls_token is not None:
+                nn.init.normal_(self.cls_token, std=0.01)
 
-        if self.text_projection is not None:
-            nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
+            width = self.transformer.width
+            proj_std = (width ** -0.5) * ((2 * self.transformer.num_layers) ** -0.5)
+            attn_std = width ** -0.5
+            fc_std = (2 * width) ** -0.5
+            for block in self.transformer.resblocks:
+                nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
+                nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
+                nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+                nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
-    def build_attention_mask(self):
+    def build_attention_mask(self, num_dims):
         # lazily create causal attention mask, with full attention between the tokens
         # pytorch uses additive attention mask; fill with -inf
-        mask = torch.empty(self.num_pos, self.num_pos)
+        mask = torch.empty(num_dims, num_dims)
         mask.fill_(float("-inf"))
         mask.triu_(1)  # zero out the lower diagonal
         return mask
@@ -255,6 +238,29 @@ class TextTransformer(BaseModule):
         additive_mask = torch.repeat_interleave(additive_mask, self.num_heads, 0)
         return additive_mask
 
+    def _freeze_stages(self):
+        # freeze position embedding
+        if self.pos_embed is not None:
+            self.pos_embed.requires_grad = False
+        # freeze token embedding
+        self.token_embed.eval()
+        for param in self.token_embed.parameters():
+            param.requires_grad = False
+        # freeze cls_token
+        if self.cls_token is not None:
+            self.cls_token.requires_grad = False
+        # freeze layers
+        for i in range(1, self.frozen_stages + 1):
+            m = self.transformer.resblocks[i - 1]
+            m.eval()
+            for param in m.parameters():
+                param.requires_grad = False
+        # freeze the last layer norm
+        if self.frozen_stages == len(self.transformer.resblocks):
+            self.ln_final.eval()
+            for param in self.ln_final.parameters():
+                param.requires_grad = False
+    
     def _repeat(self, x: Tensor, N: int) -> Tensor:
         return x.reshape(1, 1, -1).repeat(N, 1, 1)
 
@@ -263,32 +269,33 @@ class TextTransformer(BaseModule):
         seq_len = x.shape[1]
 
         res_x = x
-        x = self.token_embedding(x).to(cast_dtype)  # [batch_size, n_ctx, d_model]
+        x = self.token_embed(x).to(cast_dtype)  # [batch_size, n_ctx, d_model]
         attn_mask = self.attn_mask
-        if self.cls_emb is not None:
+        if self.cls_token is not None:
             seq_len += 1
-            x = torch.cat([x, self._repeat(self.cls_emb, x.shape[0])], dim=1)
+            x = torch.cat([x, self._repeat(self.cls_token, x.shape[0])], dim=1)
             cls_mask = self.build_cls_mask(res_x, cast_dtype)
             attn_mask = attn_mask[None, :seq_len, :seq_len] + cls_mask[:, :seq_len, :seq_len]
 
-        x = x + self.positional_embedding[:seq_len].to(cast_dtype)
+        x = x + self.pos_embed[:seq_len].to(cast_dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x, attn_mask=attn_mask)
         x = x.permute(1, 0, 2)  # LND -> NLD
+        return self._format_output(x, res_x)
 
+    def _format_output(self, x: Tensor, res_x: Tensor):
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        if self.cls_emb is not None:
+        if self.cls_token is not None:
             pooled, tokens = x[:, -1], x[:, :-1]
             pooled = self.ln_final(pooled)
         else:
             x = self.ln_final(x)
             pooled, tokens = x[torch.arange(x.shape[0]), res_x.argmax(dim=-1)], x
 
-        if self.text_projection is not None:
-            pooled = pooled @ self.text_projection
-
-        if self.output_tokens:
+        if self.out_type == 'raw':
+            return tokens
+        if self.out_type == 'token':
+            return pooled
+        if self.out_type == 'both':
             return pooled, tokens
-
-        return pooled

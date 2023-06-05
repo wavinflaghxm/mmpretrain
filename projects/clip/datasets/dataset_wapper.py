@@ -1,38 +1,31 @@
 import copy
 import logging
-from typing import Union, Sequence, Any
+from typing import Union, Sequence, Optional, List, Tuple, Any
 
 from mmengine.logging import print_log
 from mmengine.dataset import BaseDataset, force_full_init, Compose
 from mmpretrain.registry import DATASETS, TRANSFORMS
 
-from .tokenizer import tokenize
-from .metadata import OPENAI_IMAGENET_TEMPLATES, SIMPLE_IMAGENET_TEMPLATES
-
 
 @DATASETS.register_module()
-class VisionTemplateLanguageDataset:
-
-    TEMPLATE_TYPES = {
-        'openai': OPENAI_IMAGENET_TEMPLATES,
-        'simple': SIMPLE_IMAGENET_TEMPLATES,
-    }
+class InstanceDataset:
 
     def __init__(self,
                  dataset: Union[BaseDataset, dict],
-                 template: str = 'openai',
+                 filter_cfg: Optional[dict] = None,
                  pipeline: Sequence = (),
                  lazy_init: bool = False) -> None:
+        self.dataset: BaseDataset
         if isinstance(dataset, dict):
             self.dataset = DATASETS.build(dataset)
-        else:
+        elif isinstance(dataset, BaseDataset):
             self.dataset = dataset
+        else:
+            raise TypeError(
+                'elements in datasets sequence should be config or '
+                f'`BaseDataset` instance, but got {type(dataset)}')
         self._metainfo = self.dataset.metainfo
-
-        if template not in self.TEMPLATE_TYPES.keys():
-            raise ValueError(f'Unsupported `template` {template}, please '
-                             f'choose from {self.TEMPLATE_TYPES.keys()}')
-        self.templates = self.TEMPLATE_TYPES[template]
+        self.filter_cfg = copy.deepcopy(filter_cfg)
 
         transforms = []
         for transform in pipeline:
@@ -57,18 +50,22 @@ class VisionTemplateLanguageDataset:
 
         self.dataset.full_init()
 
-        use_format = isinstance(self.templates[0], str)
-        num_templates = len(self.templates)
-
-        class_names = self._metainfo['classes']
-        num_classes = len(class_names)
-
-        text = [t.format(c) if use_format else t(c) 
-                for c in class_names for t in self.templates]
-        text = tokenize(text).reshape(num_classes, num_templates, -1)
-        self.text = text
+        instance_indices = self._instance_filter()
+        self.instance_indices = instance_indices
 
         self._fully_initialized = True
+
+    def _instance_filter(self) -> List[Tuple[int, int]]:
+        min_size = self.filter_cfg.get('min_size', 0)
+
+        instance_indices = []
+        for img_idx, data in enumerate(self.dataset):
+            instances = data['instances']
+            for ins_idx, instance in enumerate(instances):
+                x1, y1, x2, y2 = instance['bbox']
+                if min((x2 - x1), (y2 - y1)) >= min_size:
+                    instance_indices.append((img_idx, ins_idx))
+        return instance_indices
     
     @force_full_init
     def get_data_info(self, idx: int) -> dict:
@@ -80,10 +77,16 @@ class VisionTemplateLanguageDataset:
         Returns:
             dict: The idx-th annotation of the datasets.
         """
-        img_data_info = self.dataset.get_data_info(idx)
-        gt_label = img_data_info['gt_label']
-        img_data_info['text'] = self.text[gt_label]
-        return img_data_info
+        img_idx, ins_idx = self.instance_indices[idx]
+        img_data_info = self.dataset.get_data_info(img_idx)
+        instances = img_data_info['instances']
+        ins_data_info = {
+            'img_path': img_data_info['img_path'],
+            'gt_label': instances[ins_idx]['bbox_label'],
+            'bbox': instances[ins_idx]['bbox'],
+            'mask': instances[ins_idx]['mask']
+        }
+        return ins_data_info
 
     def __getitem__(self, idx):
         if not self._fully_initialized:
@@ -99,7 +102,7 @@ class VisionTemplateLanguageDataset:
 
     @force_full_init
     def __len__(self):
-        return len(self.dataset)
+        return len(self.instance_indices)
 
     def prepare_data(self, idx) -> Any:
         """Get data processed by ``self.pipeline``.

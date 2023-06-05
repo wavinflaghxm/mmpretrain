@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .maclip_neck import MACLIPNeck, MACLIPMaskEncoder, MACLIPMaskDecoder
-from .maclip import MACLIP
+from .maclip import (MACLIP, MACLIPNeck, MACLIPMaskEncoder,
+                     MACLIPMaskDecoder)
 
 __all__ = [
-    'MACLIPNeck', 'MACLIPMaskEncoder', 'MACLIPMaskDecoder', 'MACLIP'
+    'MACLIP', 'MACLIPNeck', 'MACLIPMaskEncoder', 'MACLIPMaskDecoder'
 ]

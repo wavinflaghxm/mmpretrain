@@ -1,5 +1,5 @@
 
-OPENAI_IMAGENET_TEMPLATES = (
+OPENAI_PROMPT = (
     lambda c: f'a bad photo of a {c}.',
     lambda c: f'a photo of many {c}.',
     lambda c: f'a sculpture of a {c}.',
@@ -85,7 +85,7 @@ OPENAI_IMAGENET_TEMPLATES = (
 
 # a much smaller subset of above prompts
 # from https://github.com/openai/CLIP/blob/main/notebooks/Prompt_Engineering_for_ImageNet.ipynb
-SIMPLE_IMAGENET_TEMPLATES = (
+SIMPLE_PROMPT = (
     lambda c: f'itap of a {c}.',
     lambda c: f'a bad photo of the {c}.',
     lambda c: f'a origami {c}.',

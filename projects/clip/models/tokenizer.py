@@ -1,7 +1,5 @@
-""" CLIP tokenizer
-
-Copied from https://github.com/openai/CLIP. Originally MIT License, Copyright (c) 2021 OpenAI.
-"""
+# Copyright (c) OpenMMLab. All rights reserved.
+# Copied from https://github.com/openai/CLIP. Originally MIT License, Copyright (c) 2021 OpenAI.
 import gzip
 import html
 import os
@@ -11,6 +9,8 @@ from typing import Union, List
 import ftfy
 import regex as re
 import torch
+
+from mmpretrain.registry import TOKENIZER
 
 
 @lru_cache()
@@ -65,6 +65,7 @@ def whitespace_clean(text):
     return text
 
 
+@TOKENIZER.register_module()
 class SimpleTokenizer(object):
 
     def __init__(self, bpe_path: str = default_bpe(), special_tokens=None):

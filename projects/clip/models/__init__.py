@@ -1,11 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .clip_head import CLIPClsHead
-from .clip import CLIP, CLIPClassifier
-from .loss import CLIPLoss
-from .transformer import TextTransformer
-from .zero_shot_head import ZeroShotClsHead
+from .clip_head import CLIPClsHead, ZeroShotClsHead
+from .clip import CLIP
+from .tokenizer import SimpleTokenizer
+from .transformer import CLIPTextTransformer
 
 __all__ = [
-    'CLIPClsHead', 'CLIP', 'CLIPClassifier', 'CLIPLoss', 'TextTransformer',
-    'ZeroShotClsHead'
+    'CLIPClsHead', 'CLIP', 'SimpleTokenizer', 'CLIPTextTransformer', 'ZeroShotClsHead'
 ]

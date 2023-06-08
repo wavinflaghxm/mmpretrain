@@ -37,10 +37,7 @@ class CropInstanceFromImage(BaseTransform):
         if mask is not None:
             mask = maskUtils.decode(mask)
             if mask.shape[:2] != ori_shape: # write in json
-                import warnings, cv2
-                # warnings.warn(
-                #         f'The image size {ori_shape} is different from '
-                #         f'the mask size {mask.shape[:2]}.')
+                import cv2
                 mask = cv2.resize(mask, (ori_shape[1], ori_shape[0]))
             mask = mask[exp_y1: exp_y2, exp_x1: exp_x2]
             results['mask'] = mask

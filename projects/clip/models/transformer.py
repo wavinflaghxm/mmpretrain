@@ -149,7 +149,7 @@ class CLIPTextTransformer(BaseModule):
     def __init__(self,
                  context_length: int = 77,
                  vocab_size: int = 49408,
-                 width: int = 512,
+                 embed_dims: int = 512,
                  num_heads: int = 8,
                  num_layers: int = 12,
                  ls_init_value: Optional[float] = None,
@@ -164,7 +164,7 @@ class CLIPTextTransformer(BaseModule):
         super(CLIPTextTransformer, self).__init__(init_cfg=init_cfg)
         self.context_length = context_length
         self.vocab_size = vocab_size
-        self.width = width
+        self.width = width = embed_dims
         self.num_heads = num_heads
         self.pad_id = pad_id
 

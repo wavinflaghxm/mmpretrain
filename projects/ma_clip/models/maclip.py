@@ -7,6 +7,7 @@ from torch import nn
 from torch import Tensor
 from mmcv.cnn import build_activation_layer, build_norm_layer
 from mmengine.model import BaseModule, ModuleList, Sequential
+from mmengine.model.weight_init import trunc_normal_
 
 from mmpretrain.registry import MODELS
 from mmpretrain.models.utils import (LayerNorm2d, build_2d_sincos_position_embedding, 
@@ -36,43 +37,18 @@ class MACLIP(CLIP):
 @MODELS.register_module(force=True)
 class MACLIPNeck(BaseModule):
 
-    OUT_TYPES = {'raw', 'cls_token', 'patch_token'}
-
     def __init__(self,
                  encoder: dict,
                  decoder: dict,
-                 out_type: str = 'cls_token',
                  init_cfg: dict = None) -> None:
         super().__init__(init_cfg)
         self.encoder = MODELS.build(encoder)
         self.decoder = MODELS.build(decoder)
-        # Set out type
-        if out_type not in self.OUT_TYPES:
-            raise ValueError(f'Unsupported `out_type` {out_type}, please '
-                             f'choose from {self.OUT_TYPES}')
-        self.out_type = out_type
 
     def forward(self, images: Tensor, masks: Tensor) -> Tensor:
-        B, L, C = images.shape
-        cls_token, patches = torch.split(images, [1, L - 1], dim=1)
-        mask_fore, mask_back = self.encoder(masks)
-        x_fore = patches + mask_fore.permute(0, 2, 3, 1).reshape(B, L - 1, C)  # b c h w -> b (h w) c
-        x_back = patches + mask_back.permute(0, 2, 3, 1).reshape(B, L - 1, C)
-
-        x = torch.cat([x_fore, x_back], dim=-1)
-        x_cls = torch.cat([cls_token, cls_token], dim=-1)
-        x = torch.cat([x_cls, x], dim=1)
-        x = self.decoder(x)
-
-        return self._format_output(x)
-
-    def _format_output(self, x: Tensor) -> Tensor:
-        if self.out_type == 'raw':
-            return x
-        if self.out_type == 'cls_token':
-            return x[:, 0]
-        if self.out_type == 'patch_token':
-            return x[:, :-1]
+        masks = self.encoder(masks)
+        x = self.decoder(images, masks)
+        return x
 
 
 @MODELS.register_module(force=True)
@@ -122,26 +98,42 @@ class MACLIPMaskEncoder(BaseModule):
 class MACLIPMaskDecoder(BaseModule):
     """Maskd ecoder using a tranformer architecture."""
     num_extra_tokens = 1  # cls_token
+    OUT_TYPES = {'raw', 'cls_token', 'featmap'}
 
     def __init__(self,
-                 img_size: Union[int, tuple] = 224,
-                 patch_size: int = 16,
-                 embed_dims: int = 1024,
+                 embed_dims: int,
                  hidden_dims: int = 512,
                  output_dims: int = 0,
+                 img_size: Union[int, tuple] = 224,
+                 patch_size: int = 16,
                  num_layers: int = 8,
                  num_heads: int = 16,
                  mlp_ratio: int = 4,
+                 out_type: str = 'cls_token',
+                 with_cls_token: bool = True,
                  norm_cfg: dict = dict(type='LN', eps=1e-6),
                  init_cfg: Optional[dict] = None) -> None:
         super().__init__(init_cfg=init_cfg)
         img_size = to_2tuple(img_size)
-        self.num_patches = (img_size[1] // patch_size) * (img_size[0] // patch_size)
+        self.patch_resolution = (img_size[1] // patch_size, img_size[0] // patch_size)
+        self.num_patches = self.patch_resolution[0] * self.patch_resolution[1]
         self.output_dims = output_dims
+
+        # Set out type
+        if out_type not in self.OUT_TYPES:
+            raise ValueError(f'Unsupported `out_type` {out_type}, please '
+                             f'choose from {self.OUT_TYPES}')
+        self.out_type = out_type
 
         # used to convert the dim of features from encoder to the dim
         # compatible with that of decoder
         self.patch_embed = nn.Linear(embed_dims, hidden_dims, bias=True)
+
+        # Set cls token
+        if with_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
+        else:
+            self.cls_token = None
 
         # create new position embedding, different from that in encoder
         # and is not learnable
@@ -153,7 +145,7 @@ class MACLIPMaskDecoder(BaseModule):
             TransformerEncoderLayer(
                 hidden_dims,
                 num_heads,
-                int(mlp_ratio * hidden_dims),
+                int(hidden_dims * mlp_ratio),
                 qkv_bias=True,
                 norm_cfg=norm_cfg) for _ in range(num_layers)])
 
@@ -172,25 +164,52 @@ class MACLIPMaskDecoder(BaseModule):
             cls_token=True)
         self.pos_embed.data.copy_(pos_embed.float())
 
+        if (isinstance(self.init_cfg, dict)
+                and self.init_cfg['type'] == 'Pretrained'):
+            # Suppress custom init if use pretrained model.
+            return
+
+        if self.cls_token is not None:
+            trunc_normal_(self.cls_token, std=.02)
+
     @property
     def norm(self):
         return self.ln
     
-    def forward(self, x: Tensor) -> Tensor:
-        """The forward function.
+    def _format_input(self, images: Tensor, 
+                      masks: Tuple[Tensor, Tensor]) -> Tensor:
+        B, L, C = images.shape
+        mask_fore, mask_back = masks[0], masks[1]
 
-        The process computes the visible patches' features vectors and the mask
-        tokens to output feature vectors, which will be used for
-        reconstruction.
+        cls_token, patches = torch.split(images, [1, L - 1], dim=1)
+        # reshape mask (B, C, H, W) -> (B, H, W, C) -> (B, N, C)
+        x_fore = patches + mask_fore.permute(0, 2, 3,
+                                             1).reshape(B, L - 1, C)
+        x_back = patches + mask_back.permute(0, 2, 3,
+                                             1).reshape(B, L - 1, C)
+        x = torch.cat((x_fore, x_back), dim=-1)
+        # set cls token
+        x_cls = cls_token.repeat(1, 1, 2)
+        if self.cls_token is not None:
+            x_cls = x_cls + self.cls_token.expand(B, -1, -1)
+        x = torch.cat((x_cls, x), dim=1)
+        return x
 
-        Args:
-            x (Tensor): hidden features, which is of shape 
-                B x (L * mask_ratio) x C.
+    def _format_output(self, x: Tensor, hw: Tuple[int, int]) -> Tensor:
+        if self.out_type == 'raw':
+            return x
+        if self.out_type == 'cls_token':
+            return x[:, 0]
 
-        Returns:
-            Tensor: The reconstructed feature vectors, which is of shape
-                B x num_patches x C.
-        """
+        patch_token = x[:, self.num_extra_tokens:]
+        if self.out_type == 'featmap':
+            B = x.size(0)
+            # (B, N, C) -> (B, H, W, C) -> (B, C, H, W)
+            return patch_token.reshape(B, *hw, -1).permute(0, 3, 1, 2)
+
+    def forward(self, images: Tensor, masks: Tuple[Tensor, Tensor]) -> Tensor:
+        """The forward function."""
+        x = self._format_input(images, masks)
         # embed patch tokens
         x = self.patch_embed(x)
 
@@ -205,4 +224,4 @@ class MACLIPMaskDecoder(BaseModule):
         if self.output_dims > 0:
             x = self.projection(x)
 
-        return x
+        return self._format_output(x, self.patch_resolution)
